@@ -78,7 +78,7 @@ PROJECT_RESUME_DETECTION/
    .venv\Scripts\activate   # For Windows
 👨‍💻 Author
 
-Made with ❤️ for academic/project use.
+Made with Anmol Gupta for academic/project use.
 
 
 ---
