@@ -1,4 +1,4 @@
-# 📄 Smart Resume Analyzer (Domain Based ATS):->
+# 📄 Smart Resume Analyzer (Domain Based ATS):-
 
 [![Python](https://img.shields.io/badge/Python-3.13-blue)](https://www.python.org/)  
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.26.1-orange)](https://streamlit.io/)  
@@ -78,7 +78,7 @@ PROJECT_RESUME_DETECTION/
    .venv\Scripts\activate   # For Windows
 👨‍💻 Author
 
-Made with ❤️ for academic/project use.
+Made with Anmol Gupta for academic/project use.
 
 
 ---
