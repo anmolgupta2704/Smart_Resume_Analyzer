@@ -1,6 +1,6 @@
 import streamlit as st
 from rapidfuzz import fuzz
-from utils import extract_text_from_pdf, render_resume_pdf, enhance_experience_with_ai
+from utils import extract_text_from_pdf, render_resume_pdf, enhance_experience_with_ai, extract_jd_skills_with_ai
 from web_scraper import get_latest_skills, get_all_domains
 import streamlit.components.v1 as components
 from auth import require_login_if_needed, google_login_button, register_user, login_user, logout
@@ -27,7 +27,9 @@ st.markdown("""
     .skill-badge-red    { background:#fee2e2; color:#991b1b; padding:4px 10px; border-radius:12px; margin:3px; display:inline-block; font-size:0.82rem; }
     .skill-badge-blue   { background:#e1ecf4; color:#0366d6; padding:4px 10px; border-radius:12px; margin:3px; display:inline-block; font-size:0.82rem; }
     .skill-badge-yellow { background:#fef9c3; color:#78350f; padding:4px 10px; border-radius:12px; margin:3px; display:inline-block; font-size:0.82rem; }
+    .skill-badge-purple { background:#ede9fe; color:#5b21b6; padding:4px 10px; border-radius:12px; margin:3px; display:inline-block; font-size:0.82rem; }
     .score-box { padding:16px; border-radius:12px; text-align:center; }
+    .tip-card  { background:#f0f9ff; border-left:4px solid #0ea5e9; padding:12px 16px; border-radius:8px; margin:8px 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,24 +68,23 @@ if "user" in st.session_state:
     if st.sidebar.button("🚪 Logout"):
         logout()
 
-# All domains from web_scraper
 all_domains = get_all_domains()
-
-domain = st.sidebar.selectbox("Choose Domain", all_domains, index=all_domains.index("Software Engineering") if "Software Engineering" in all_domains else 0)
+domain = st.sidebar.selectbox(
+    "Choose Domain", all_domains,
+    index=all_domains.index("Software Engineering") if "Software Engineering" in all_domains else 0
+)
 threshold = st.sidebar.slider("Skill Match Sensitivity (%)", 60, 100, 80, step=5)
 show_tips = st.sidebar.checkbox("💡 AI Resume Tips", value=True)
 
-# Fetch skills for selected domain
 live_skills = get_latest_skills(domain)
 
 st.sidebar.markdown("### 📌 Trending Skills")
 st.sidebar.markdown(
-    " ".join([f"<span class='skill-badge-blue'>{s}</span>" for s in live_skills]),
+    " ".join([f"<span class='skill-badge-blue'>{s}</span>" for s in live_skills[:10]]),
     unsafe_allow_html=True,
 )
 
-# Navigation
-tab = st.sidebar.radio("Go To", ["🧠 Skill Analyzer", "🎯 JD Matcher", "📄 Resume Builder", "👤 Profile"])
+tab = st.sidebar.radio("Go To", ["🧠 Skill Analyzer", "🎯 JD Matcher", "📄 Resume Builder", "🔍 Resume Checker", "👤 Profile"])
 
 
 # ─────────────────────────── HELPERS ────────────────────────────────────────
@@ -128,17 +129,49 @@ def make_csv(matched, missing, domain):
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
-def extract_skills_from_jd(jd_text):
-    """Return words/phrases likely to be skills from JD text."""
-    # Split on common delimiters and clean
-    tokens = re.split(r"[,•\n\-–|/]", jd_text)
-    skills = []
-    for t in tokens:
-        t = t.strip()
-        # Keep tokens that look like skill names (2–40 chars, not pure stopwords)
-        if 4 <= len(t) <= 40 and not t.lower().startswith(("the ", "and ", "or ", "with ", "must ", "should ")):
-            skills.append(t)
-    return list(dict.fromkeys(skills))  # deduplicate preserving order
+def keyword_density(resume_text, skills):
+    """Count how many times each matched skill appears in resume text."""
+    counts = {}
+    for skill in skills:
+        count = len(re.findall(re.escape(skill.lower()), resume_text.lower()))
+        if count > 0:
+            counts[skill] = count
+    return counts
+
+def ats_readability_check(resume_text):
+    """Basic ATS-friendliness checks on the raw resume text."""
+    issues = []
+    suggestions = []
+
+    # Check length
+    word_count = len(resume_text.split())
+    if word_count < 200:
+        issues.append("⚠️ Resume is too short (under 200 words). ATS may rank it low.")
+        suggestions.append("Add more detail to Experience and Projects sections.")
+    elif word_count > 1200:
+        issues.append("⚠️ Resume may be too long (over 1200 words). Keep it concise.")
+        suggestions.append("Trim repetitive bullet points and keep to 1-2 pages.")
+
+    # Check for common ATS-unfriendly signs
+    if resume_text.count("|") > 10:
+        issues.append("⚠️ Too many pipe '|' characters — could be a table, which many ATS cannot parse.")
+    if resume_text.count("\t") > 15:
+        issues.append("⚠️ Many tab characters detected — possible table/column layout that ATS may misread.")
+
+    # Check for contact info signals
+    if not re.search(r"[\w\.-]+@[\w\.-]+\.\w+", resume_text):
+        issues.append("⚠️ No email address found in resume text.")
+        suggestions.append("Make sure your email is in plain text, not inside an image or graphic.")
+    if not re.search(r"\b(\+?\d[\d\s\-]{8,})\b", resume_text):
+        issues.append("⚠️ No phone number detected.")
+
+    # Check for key sections
+    for section in ["experience", "education", "skills"]:
+        if section not in resume_text.lower():
+            issues.append(f"⚠️ Section '{section.capitalize()}' not clearly labeled.")
+            suggestions.append(f"Add a clear heading '{section.capitalize()}' so ATS can categorize your content.")
+
+    return issues, suggestions
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -167,7 +200,6 @@ if tab == "🧠 Skill Analyzer":
         c3.metric("❌ Skills Missing",   len(missing))
         c4.metric("📋 Total Skills",     len(live_skills))
 
-        # Score bar
         st.progress(int(score))
         if score >= 80:
             st.success("🟢 Excellent! Your resume is well-optimized for this domain.")
@@ -182,10 +214,25 @@ if tab == "🧠 Skill Analyzer":
         with col_m:
             st.markdown("### ✅ Matched Skills")
             st.markdown(badges(matched, "skill-badge-green"), unsafe_allow_html=True)
-
         with col_miss:
             st.markdown("### ❌ Missing Skills")
             st.markdown(badges(missing, "skill-badge-red"), unsafe_allow_html=True)
+
+        # ── Keyword Density ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 🔢 Keyword Density (how often matched skills appear)")
+        density = keyword_density(resume_text, matched)
+        if density:
+            density_df = pd.DataFrame(
+                sorted(density.items(), key=lambda x: -x[1]),
+                columns=["Skill", "Mentions"]
+            )
+            st.dataframe(density_df, use_container_width=True, hide_index=True)
+            low_density = [k for k, v in density.items() if v == 1]
+            if low_density:
+                st.info(f"💡 These skills appear only once — mention them more: **{', '.join(low_density[:5])}**")
+        else:
+            st.info("No keyword density data available.")
 
         # ── AI Tips ─────────────────────────────────────────────────────────
         if show_tips and missing:
@@ -211,7 +258,6 @@ if tab == "🧠 Skill Analyzer":
             mime="text/csv",
         )
 
-        # ── Save History ─────────────────────────────────────────────────────
         if "user" in st.session_state:
             save_resume_history(st.session_state.user, domain, score)
 
@@ -219,11 +265,11 @@ if tab == "🧠 Skill Analyzer":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: JD MATCHER (NEW!)
+# TAB 2: JD MATCHER  — AI-powered skill extraction (FIXED)
 # ══════════════════════════════════════════════════════════════════════════════
 elif tab == "🎯 JD Matcher":
     st.title("🎯 Job Description Matcher")
-    st.caption("Paste any job description — we'll compare your resume against its required skills.")
+    st.caption("Paste a JD — AI extracts **only the skills/requirements**, then matches against your resume.")
 
     col_l, col_r = st.columns(2)
 
@@ -247,12 +293,17 @@ elif tab == "🎯 JD Matcher":
                 else jd_resume.read().decode("utf-8")
             )
 
-            # Extract skills from JD
-            jd_skills = extract_skills_from_jd(jd_text)
+            # ── AI-powered JD skill extraction (key fix) ────────────────────
+            with st.spinner("🤖 AI is extracting skills from JD…"):
+                jd_skills = extract_jd_skills_with_ai(jd_text)
 
             if not jd_skills:
                 st.warning("Could not extract skills from the JD. Make sure it lists requirements.")
             else:
+                st.success(f"✅ AI extracted **{len(jd_skills)} skills** from the JD")
+                with st.expander("🔎 View extracted JD skills"):
+                    st.markdown(badges(jd_skills, "skill-badge-purple"), unsafe_allow_html=True)
+
                 matched_jd, missing_jd = match_resume_with_skills(resume_text, jd_skills, threshold)
                 jd_score = calculate_score(matched_jd, jd_skills)
 
@@ -279,11 +330,25 @@ elif tab == "🎯 JD Matcher":
                     st.markdown("### ❌ Skills to Add / Highlight")
                     st.markdown(badges(missing_jd, "skill-badge-yellow"), unsafe_allow_html=True)
 
-                # AI gap analysis
+                # ── Tailoring tips ───────────────────────────────────────────
                 if show_tips and missing_jd:
                     with st.expander("💡 How to Close the Skill Gap", expanded=False):
                         with st.spinner("Generating tips…"):
                             st.markdown(ai_suggestions(missing_jd[:10], domain))
+
+                # ── Resume tailoring suggestion ──────────────────────────────
+                if missing_jd:
+                    with st.expander("✍️ AI: Tailor My Resume for This JD", expanded=False):
+                        with st.spinner("Generating tailored summary…"):
+                            tailor_prompt = f"""You are an expert resume writer.
+The candidate is applying for a {domain} role. Their resume is missing these JD skills: {', '.join(missing_jd[:8])}.
+
+Write a tailored professional summary (3-4 lines) that:
+1. Emphasizes matching skills naturally
+2. Briefly acknowledges gaps as areas of growth
+3. Is ATS-friendly with keywords from: {', '.join(matched_jd[:5])}
+Keep it under 80 words."""
+                            st.markdown(enhance_experience_with_ai(tailor_prompt))
 
                 st.download_button(
                     "📥 Download JD Match Report (CSV)",
@@ -316,7 +381,10 @@ elif tab == "📄 Resume Builder":
             summary = st.text_area("Summary")
 
             st.subheader("💡 Skills")
-            skills = st.text_area("Skills (comma separated)")
+            skills_input = st.text_area("Skills (comma separated)")
+
+            # ── Skill suggestions from domain ────────────────────────────────
+            st.caption(f"💡 Suggested skills for **{domain}**: {', '.join(live_skills[:8])}")
 
             st.subheader("🎓 Education")
             education = st.text_area("Education (one per line)")
@@ -337,36 +405,120 @@ elif tab == "📄 Resume Builder":
             submitted = st.form_submit_button("Generate Resume")
 
     if submitted:
-        exp_text = enhance_experience_with_ai(experience) if enhance else experience
-        resume_data = {
-            "name":           name,
-            "email":          email,
-            "phone":          phone,
-            "linkedin":       linkedin,
-            "github":         github,
-            "summary":        summary,
-            "skills":         [s.strip() for s in skills.split(",")       if s.strip()],
-            "education":      [e.strip() for e in education.split("\n")   if e.strip()],
-            "experience":     [e.strip() for e in exp_text.split("\n")    if e.strip()],
-            "projects":       [p.strip() for p in projects.split("\n")    if p.strip()],
-            "certifications": [c.strip() for c in certifications.split("\n") if c.strip()],
-        }
+        if not name or not email:
+            st.error("Name and Email are required.")
+        else:
+            exp_text = enhance_experience_with_ai(experience) if enhance else experience
+            resume_data = {
+                "name":           name,
+                "email":          email,
+                "phone":          phone,
+                "linkedin":       linkedin,
+                "github":         github,
+                "summary":        summary,
+                "skills":         [s.strip() for s in skills_input.split(",") if s.strip()],
+                "education":      [e.strip() for e in education.split("\n")   if e.strip()],
+                "experience":     [e.strip() for e in exp_text.split("\n")    if e.strip()],
+                "projects":       [p.strip() for p in projects.split("\n")    if p.strip()],
+                "certifications": [c.strip() for c in certifications.split("\n") if c.strip()],
+            }
 
-        with right:
-            st.subheader("📄 Resume Preview")
-            html_preview = render_resume_pdf(resume_data, template_choice, preview=True)
-            components.html(html_preview, height=800, scrolling=True)
-            pdf_bytes = render_resume_pdf(resume_data, template_choice, preview=False)
-            st.download_button(
-                "📥 Download PDF",
-                pdf_bytes,
-                file_name=f"{name.replace(' ', '_')}_resume.pdf",
-                mime="application/pdf",
-            )
+            with right:
+                st.subheader("📄 Resume Preview")
+                html_preview = render_resume_pdf(resume_data, template_choice, preview=True)
+                components.html(html_preview, height=800, scrolling=True)
+
+                pdf_bytes = render_resume_pdf(resume_data, template_choice, preview=False)
+                if isinstance(pdf_bytes, bytes):
+                    st.download_button(
+                        "📥 Download PDF",
+                        pdf_bytes,
+                        file_name=f"{name.replace(' ', '_')}_resume.pdf",
+                        mime="application/pdf",
+                    )
+                else:
+                    st.error(pdf_bytes)  # show error string if PDF generation failed
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: PROFILE
+# TAB 4: RESUME CHECKER (NEW)
+# ══════════════════════════════════════════════════════════════════════════════
+elif tab == "🔍 Resume Checker":
+    st.title("🔍 ATS Resume Checker")
+    st.caption("Upload your resume to get a full ATS-friendliness audit and improvement suggestions.")
+
+    uploaded_check = st.file_uploader("Upload Resume (PDF or TXT)", type=["pdf", "txt"], key="checker")
+
+    if uploaded_check:
+        resume_text = (
+            extract_text_from_pdf(uploaded_check)
+            if uploaded_check.type == "application/pdf"
+            else uploaded_check.read().decode("utf-8")
+        )
+
+        issues, suggestions = ats_readability_check(resume_text)
+
+        st.markdown("---")
+        st.subheader("📋 ATS Audit Results")
+
+        if not issues:
+            st.success("🟢 Your resume passes all basic ATS checks!")
+        else:
+            for issue in issues:
+                st.warning(issue)
+            if suggestions:
+                st.markdown("**🛠 How to fix:**")
+                for s in suggestions:
+                    st.markdown(f"<div class='tip-card'>💡 {s}</div>", unsafe_allow_html=True)
+
+        # ── Word count & reading level ───────────────────────────────────────
+        st.markdown("---")
+        word_count = len(resume_text.split())
+        col1, col2, col3 = st.columns(3)
+        col1.metric("📝 Word Count", word_count, help="Ideal: 400–800 words")
+        col2.metric("📄 Estimated Pages", f"~{max(1, word_count // 400)}")
+        col3.metric("🔤 Unique Words", len(set(resume_text.lower().split())))
+
+        # ── Section detection ─────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📂 Section Detection")
+        sections = ["summary", "objective", "experience", "education", "skills",
+                    "projects", "certifications", "achievements", "languages", "interests"]
+        detected = [s.capitalize() for s in sections if s in resume_text.lower()]
+        missing_sec = [s.capitalize() for s in sections if s not in resume_text.lower()]
+
+        col_d, col_m = st.columns(2)
+        with col_d:
+            st.markdown("**✅ Detected Sections**")
+            st.markdown(badges(detected, "skill-badge-green"), unsafe_allow_html=True)
+        with col_m:
+            st.markdown("**❌ Possibly Missing**")
+            st.markdown(badges(missing_sec, "skill-badge-red"), unsafe_allow_html=True)
+
+        # ── AI comprehensive review ──────────────────────────────────────────
+        if show_tips:
+            st.markdown("---")
+            with st.expander("🤖 AI Full Resume Review", expanded=False):
+                with st.spinner("Analyzing your resume…"):
+                    review_prompt = f"""You are an expert ATS resume reviewer.
+Analyze the following resume text and provide:
+1. Overall ATS score estimate (out of 100) with reasoning
+2. Top 3 strengths
+3. Top 3 weaknesses
+4. 3 specific action items to improve ATS score
+5. One-line verdict
+
+Resume Text:
+\"\"\"
+{resume_text[:3000]}
+\"\"\"
+
+Be specific, concise, and actionable."""
+                    st.markdown(enhance_experience_with_ai(review_prompt))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5: PROFILE
 # ══════════════════════════════════════════════════════════════════════════════
 elif tab == "👤 Profile":
     st.title("👤 My Profile")
@@ -381,13 +533,24 @@ elif tab == "👤 Profile":
         df = pd.DataFrame(rows, columns=["Domain", "ATS Score (%)", "Checked At"])
         st.dataframe(df, use_container_width=True)
 
-        # Quick stats
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Checks",  len(rows))
         c2.metric("Best Score",    f"{max(r[1] for r in rows)}%")
         c3.metric("Avg Score",     f"{round(sum(r[1] for r in rows)/len(rows), 1)}%")
 
-        # Score trend
         st.subheader("📈 Score Trend")
-        trend_df = pd.DataFrame({"Check #": range(1, len(rows)+1), "Score": [r[1] for r in rows][::-1]})
+        trend_df = pd.DataFrame({
+            "Check #": range(1, len(rows)+1),
+            "Score":   [r[1] for r in rows][::-1]
+        })
         st.line_chart(trend_df.set_index("Check #"))
+
+        # ── Download full history ────────────────────────────────────────────
+        csv_buf = io.StringIO()
+        df.to_csv(csv_buf, index=False)
+        st.download_button(
+            "📥 Download History CSV",
+            csv_buf.getvalue().encode("utf-8"),
+            file_name="resume_history.csv",
+            mime="text/csv",
+        )
